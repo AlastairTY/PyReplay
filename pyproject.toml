@@ -1,0 +1,9 @@
+[project]
+name = "pyreplay"
+version = "0.1.0"
+description = "A free open-source macro recorder and editor made with python. "
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pynput>=1.8.2",
+]
