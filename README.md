@@ -10,6 +10,8 @@ A free open-source macro recorder and editor made with python.
 - Runs locally
 - Record keystrokes, mouse clicks, & mouse movements
 - Actions are translated into editable blocks for finetuning
+- Editor to reorder, rename, disable, & hand-write steps
+- Record extra steps into the middle of an existing macro
 - Replay & repeat macros
 - Save macros as files (JSON)
 
@@ -33,21 +35,35 @@ uv sync
 ## Usage
 
 ```
-uv run main.py record     # record, then compact and save
-uv run main.py show       # print the macro's steps
-uv run main.py play       # replay it
-uv run main.py compact    # rebuild the macro from the raw recording
+uv run main.py
+```
+
+That opens the editor. Record from the toolbar, and the steps appear in the
+list when you stop. From there you can rename them, switch them off, reorder
+them by dragging, cut and paste them, and insert waits or clicks by hand.
+`Insert > Recording` records straight into the middle of an existing macro.
+
+There is also a CLI, mostly for replaying a saved macro without opening a
+window:
+
+```
+uv run main.py play macros/login.json
+uv run main.py play macros/login.json --speed 2
+uv run main.py record     # record and save without the editor
+uv run main.py show       # print the steps
+uv run main.py compact    # rebuild a macro from the raw recording
 ```
 
 While recording, `F10` pauses and `F9` stops. During playback `F9` aborts.
-Both keys, along with every threshold below, live in `config.py`.
+Both keys live in `config.py`, along with the compaction thresholds.
 
-Two files are written:
+Macros are JSON and are saved wherever you point the editor, `macros/` by
+default. Two more files live in `outputs/`:
 
 | file | what it holds |
 | --- | --- |
-| `outputs/recording.json` | the raw event log, every mouse move and keypress |
-| `outputs/macro.json` | the compacted steps, meant to be read and edited |
+| `outputs/recording.json` | the raw event log from the last recording |
+| `outputs/macro.json` | the steps the CLI reads when you do not name a macro |
 
 > Recording captures **everything** typed while it runs, passwords included.
 > Recordings stay out of git by default. Use `F10` to pause before typing
@@ -56,8 +72,8 @@ Two files are written:
 
 ## How it works
 
-Recording produces a few thousand raw events. A pass of matchers turns those
-into steps, and only then is anything worth editing:
+A recording is a few thousand raw events. Matchers turn those into a short
+list of steps you can read and edit:
 
 ```
 record   ->  raw events (~4500)      the tape
@@ -65,19 +81,18 @@ compact  ->  steps (~90)             the macro, editable
 play     ->  performs the steps
 ```
 
-Each matcher claims a pattern in the event stream — a quick press and release
-becomes a `click`, a run of characters becomes `type_text`, a run of movement
-becomes a `move` with its path thinned to the points that describe its shape.
-Anything no matcher recognises falls back to the raw press and release, so an
-unusual gesture comes out verbose rather than wrong.
+Each matcher claims a pattern in the event stream: a quick press and release
+becomes a `click`, a run of characters becomes `type_text`, and a run of
+movement becomes a `move` with its path thinned to the points that describe
+its shape. Anything no matcher recognises falls back to the raw press and
+release, so an unusual gesture comes out verbose rather than wrong.
 
-`compact` re-runs that pass over a recording you already have, so the
-thresholds in `config.py` can be tuned without recording again.
+`compact` re-runs that pass over a recording you already have, so you can tune
+the thresholds in `config.py` without recording again.
 
 
 ## Roadmap
 
-- UI to edit & view steps
 - Image & text matching w/ OCR
 - Post-playback options
 - Scheduling

@@ -9,8 +9,11 @@ wheels/
 # Virtual environments
 .venv
 
-# Recordings capture every keystroke, so they stay local
+# Recordings and macros hold whatever was typed while recording
 outputs/
+macros/
 
-# Scratch scripts from early prototyping
+# Other
 other/
+.claude/skills/
+

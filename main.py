@@ -2,54 +2,29 @@ from system import enable_dpi_awareness
 import argparse
 import compactor
 import config
-import json
+import macro
 import os
 import player
 import recorder
 import time
 
 
-def save_macro(steps: list, path: str):
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-
-    with open(path, "w") as f:
-        json.dump({"version": 1, "steps": steps}, f, indent=2)
-
+def save(steps: list, path: str):
+    macro.save(steps, path)
     print("saved %s steps to %s" % (len(steps), path))
 
 
-def load(path: str, key: str) -> list:
-    with open(path) as f:
-        return json.load(f)[key]
-
-
-def summarise(step: dict) -> str:
-    kind = step["type"]
-
-    if kind == "wait":
-        return "%s ms%s" % (step["ms"], "  (%s)" % step["note"] if "note" in step else "")
-    if kind == "type_text":
-        return repr(step["text"])
-    if kind in ("key_press", "key_down", "key_up"):
-        return step["key"]
-    if kind == "move":
-        return "%s -> %s   %s pts" % (step["from"], step["to"], len(step.get("path", [])))
-    if kind == "scroll":
-        return "dx %s  dy %s   at (%s, %s)" % (step["dx"], step["dy"], step["x"], step["y"])
-    if kind in ("click", "mouse_down", "mouse_up"):
-        return "%s at (%s, %s)" % (step["button"], step["x"], step["y"])
-
-    return ""
-
-
 def show(steps: list):
+    disabled = 0
     for n, step in enumerate(steps):
-        print("%4d  %7.2f  %-11s %s"
-              % (n, step.get("t_start", 0), step["type"], summarise(step)))
+        off = not step.get("enabled", True)
+        disabled += off
 
-    print("\n%s steps" % len(steps))
+        print("%4d %s %7.2f  %-11s %-34s %s"
+              % (n, "x" if off else " ", step.get("t_start", 0), step["type"],
+                 macro.summarise(step), step.get("name", "")))
+
+    print("\n%s steps%s" % (len(steps), ", %s disabled" % disabled if disabled else ""))
 
 
 def countdown(action: str):
@@ -64,25 +39,38 @@ def cmd_record(args):
     recorder.save(events, config.RECORDING_PATH)
 
     steps = compactor.compact(events)
-    save_macro(steps, config.MACRO_PATH)
+    save(steps, config.MACRO_PATH)
     show(steps)
 
 
 def cmd_compact(args):
     """Rebuild the macro from the raw log, picking up any config changes."""
-    events = load(config.RECORDING_PATH, "events")
+    # neither field is written by the compactor, so either one means somebody
+    # has been in the file and rebuilding it would throw their work away
+    existing = macro.load(config.MACRO_PATH) if os.path.exists(config.MACRO_PATH) else []
+    if not args.force and any(("name" in step) or ("enabled" in step) for step in existing):
+        print("%s has edits that re-compacting would discard, pass --force"
+              % config.MACRO_PATH)
+        return
+
+    events = macro.load(config.RECORDING_PATH, "events")
     steps = compactor.compact(events)
 
     print("%s events -> %s steps" % (len(events), len(steps)))
-    save_macro(steps, config.MACRO_PATH)
+    save(steps, config.MACRO_PATH)
 
 
 def cmd_show(args):
-    show(load(config.MACRO_PATH, "steps"))
+    show(macro.load(config.MACRO_PATH))
+
+
+def cmd_ui(args):
+    import ui   # imported late so the CLI does not pull in Qt
+    ui.run()
 
 
 def cmd_play(args):
-    steps = load(config.MACRO_PATH, "steps")
+    steps = macro.load(args.macro or config.MACRO_PATH)
 
     print("%s steps, press %s to abort" % (len(steps), config.ABORT_KEY))
     countdown("replaying")
@@ -92,13 +80,20 @@ def cmd_play(args):
 
 def main():
     parser = argparse.ArgumentParser(description="record, compact and replay input macros")
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command")
+
+    # no subcommand opens the editor, which is the usual way in
+    parser.set_defaults(run=cmd_ui)
 
     commands.add_parser("record", help="record input and write a macro").set_defaults(run=cmd_record)
-    commands.add_parser("compact", help="rebuild the macro from the raw log").set_defaults(run=cmd_compact)
+    compact = commands.add_parser("compact", help="rebuild the macro from the raw log")
+    compact.add_argument("--force", action="store_true", help="overwrite a macro with edits")
+    compact.set_defaults(run=cmd_compact)
     commands.add_parser("show", help="print the macro's steps").set_defaults(run=cmd_show)
+    commands.add_parser("ui", help="open the editor").set_defaults(run=cmd_ui)
 
-    play = commands.add_parser("play", help="replay the macro")
+    play = commands.add_parser("play", help="replay a macro")
+    play.add_argument("macro", nargs="?", help="path to a macro, or the last one recorded")
     play.add_argument("--speed", type=float, default=None, help="1.0 is recorded speed")
     play.set_defaults(run=cmd_play)
 

@@ -28,16 +28,19 @@ class Player:
     Each step simply takes as long as it takes.
     """
 
-    def __init__(self, speed: float = None):
+    def __init__(self, speed: float = None, on_step=None):
         self.speed = speed or config.PLAYBACK_SPEED
+        # called with the index of each step as it starts, so a caller running
+        # this on a worker thread can follow along
+        self.on_step = on_step
         self.aborted = False
         self.held_keys = set()
         self.held_buttons = set()
         self.mouse = mouse.Controller()
         self.keyboard = keyboard.Controller()
 
-    def run(self, steps: list) -> bool:
-        """Perform every step, returning False if the run was aborted."""
+    def run(self, steps: list, start: int = 0) -> bool:
+        """Perform every step from start onwards, returning False if aborted."""
         # the only listener running during playback, so nothing can feed our
         # own injected input back into a recording
         listener = keyboard.Listener(on_press=self.on_abort_key)
@@ -45,10 +48,14 @@ class Player:
 
         try:
             with high_resolution_timer():
-                for step in steps:
+                for index in range(start, len(steps)):
                     if self.aborted:
                         break
-                    self.play(step)
+
+                    if self.on_step:
+                        self.on_step(index)
+
+                    self.play(steps[index])
         finally:
             self.release_held()
             listener.stop()
@@ -90,6 +97,11 @@ class Player:
             time.sleep(min(remaining, 0.02))
 
     def play(self, step: dict):
+        # missing means enabled, so nothing has to write the field until a step
+        # is actually switched off
+        if not step.get("enabled", True):
+            return
+
         handler = getattr(self, "play_" + step["type"], None)
         if handler is None:
             print("skipping unknown step type: %s" % step["type"])

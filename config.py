@@ -4,6 +4,10 @@ PAUSE_KEY = "F10"
 RECORDING_PATH = "outputs/recording.json"
 MACRO_PATH = "outputs/macro.json"
 
+### Editor
+MACROS_DIR = "macros"
+UNDO_DEPTH = 50
+
 ### Player
 ABORT_KEY = "F9"
 PLAYBACK_SPEED = 1.0
