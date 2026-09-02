@@ -8,6 +8,7 @@ import os
 import player
 import recorder
 import sys
+import system
 
 
 # Fields the details panel offers per step type. A caster of None shows the
@@ -37,18 +38,128 @@ NEW_STEPS = [
 
 RUNNING_COLOUR = QtGui.QColor("#fff3bf")
 DISABLED_COLOUR = QtGui.QColor("#9e9e9e")
+RECORDING_COLOUR = QtGui.QColor("#e03131")
+PAUSED_COLOUR = QtGui.QColor("#f08c00")
+PLAYING_COLOUR = QtGui.QColor("#1971c2")
+
+# the corner the overlay writes its label in, repainted on its own
+CHIP_AREA = QtCore.QRect(0, 0, 900, 80)
+
+
+def standard_icon(name: str) -> QtGui.QIcon:
+    """One of the icons Qt ships with, so nothing has to be bundled."""
+    return QtWidgets.QApplication.style().standardIcon(
+        getattr(QtWidgets.QStyle.StandardPixmap, name))
+
+
+def record_icon(size: int = 16) -> QtGui.QIcon:
+    """Qt has no record icon, so draw the red dot everything else uses."""
+    pixmap = QtGui.QPixmap(size, size)
+    pixmap.fill(QtCore.Qt.transparent)
+
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    painter.setPen(QtCore.Qt.NoPen)
+    painter.setBrush(RECORDING_COLOUR)
+    painter.drawEllipse(2, 2, size - 4, size - 4)
+    painter.end()
+
+    return QtGui.QIcon(pixmap)
+
+
+def recording_label(paused: bool) -> str:
+    state = "Paused  ·  %s to resume" if paused else "Recording  ·  %s to pause"
+    return (state % config.PAUSE_KEY) + ("  ·  %s to stop" % config.STOP_KEY)
+
 
 # remembers the last macro between sessions, in the registry on windows
-SETTINGS = QtCore.QSettings("PyReplay", "PyReplay")
+SETTINGS = QtCore.QSettings(config.APP_NAME, config.APP_NAME)
+
+# relative to this file, so the logo is found whatever the working directory is
+ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), config.ASSETS_DIR)
+LOGO = os.path.join(ASSETS, config.LOGO)
 
 
 class RecordThread(QtCore.QThread):
-    """Runs the recorder, which blocks on its listener until the stop key."""
+    """Runs the recorder, which blocks on its listener until told to stop."""
 
     done = QtCore.Signal(object)
+    paused = QtCore.Signal(bool)
+
+    def __init__(self):
+        super().__init__()
+        self.finish = None
 
     def run(self):
-        self.done.emit(recorder.record())
+        # the pause callback fires on the hook thread, so it goes out as a
+        # signal and Qt delivers it on the main thread
+        self.done.emit(recorder.record(on_pause=self.paused.emit,
+                                       on_ready=self.ready))
+
+    def ready(self, finish):
+        self.finish = finish
+
+    def stop(self):
+        if self.finish:
+            self.finish()
+
+
+class Overlay(QtWidgets.QWidget):
+    """
+    A border drawn around the desktop while recording or replaying.
+
+    Transparent to input, so it cannot swallow the clicks going past it, and
+    frameless with no taskbar entry so there is nothing to hit by accident.
+    """
+
+    def __init__(self):
+        super().__init__(None, QtCore.Qt.FramelessWindowHint
+                         | QtCore.Qt.WindowStaysOnTopHint
+                         | QtCore.Qt.WindowTransparentForInput
+                         | QtCore.Qt.Tool)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
+        self.colour = RECORDING_COLOUR
+        self.label = ""
+
+    def show_over_screens(self, colour: QtGui.QColor, label: str):
+        area = QtCore.QRect()
+        for screen in QtWidgets.QApplication.screens():
+            area = area.united(screen.geometry())
+
+        self.setGeometry(area)
+        self.set_state(colour, label)
+        self.show()
+
+    def set_state(self, colour: QtGui.QColor, label: str):
+        self.colour = colour
+        self.label = label
+        self.update()
+
+    def set_label(self, label: str):
+        # only the corner, since playback repaints this on every step and the
+        # window is the size of the whole desktop
+        self.label = label
+        self.update(CHIP_AREA)
+
+    def paintEvent(self, _event: QtGui.QPaintEvent):
+        colour, label = self.colour, self.label
+
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+
+        # inset by half the pen width, or half the stroke falls off the screen
+        inset = config.OVERLAY_BORDER_PX / 2
+        painter.setPen(QtGui.QPen(colour, config.OVERLAY_BORDER_PX))
+        painter.drawRect(QtCore.QRectF(self.rect()).adjusted(inset, inset, -inset, -inset))
+
+        chip = QtCore.QRectF(20, 20, painter.fontMetrics().horizontalAdvance(label) + 28, 30)
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(colour)
+        painter.drawRoundedRect(chip, 6, 6)
+
+        painter.setPen(QtGui.QColor("white"))
+        painter.drawText(chip, QtCore.Qt.AlignCenter, label)
 
 
 class PlayThread(QtCore.QThread):
@@ -175,6 +286,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.populating = False
         self.running_row = None
         self.inserting_recording = False
+        self.overlay = None
+        self.remaining = 0
+        self.countdown_timer = None
         self.record_thread = None
         self.play_thread = None
 
@@ -249,21 +363,35 @@ class MainWindow(QtWidgets.QMainWindow):
         for label, template in NEW_STEPS:
             insert.addAction(label, lambda t=template: self.add_steps([t], "inserted"))
 
+    def section(self, bar: QtWidgets.QToolBar, title: str):
+        """A caption so the groups on the toolbar read as groups."""
+        if bar.actions():
+            bar.addSeparator()
+
+        caption = QtWidgets.QLabel(" %s " % title)
+        caption.setStyleSheet("color: palette(mid); font-size: 11px;")
+        bar.addWidget(caption)
+
     def build_toolbar(self):
         bar = self.addToolBar("main")
         bar.setMovable(False)
+        bar.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
 
-        # lambdas because Qt passes the action's checked state as the first
+        self.section(bar, "Run")
+        # a lambda because Qt passes the action's checked state as the first
         # argument, which is not what start_recording means by it
-        self.record_action = bar.addAction("Record", lambda: self.start_recording(False))
-        self.play_action = bar.addAction("Play", self.start_playback)
-        self.stop_action = bar.addAction("Stop", self.stop_playback)
+        self.record_action = bar.addAction(record_icon(), "Record",
+                                           lambda: self.start_recording(False))
+        self.play_action = bar.addAction(standard_icon("SP_MediaPlay"), "Play",
+                                         self.start_playback)
+        self.stop_action = bar.addAction(standard_icon("SP_MediaStop"), "Stop", self.stop)
         self.stop_action.setEnabled(False)
-        bar.addSeparator()
 
+        self.section(bar, "Playback")
         self.repeats = QtWidgets.QSpinBox()
         self.repeats.setRange(1, 999)
         self.repeats.setPrefix("repeat  ")
+        self.repeats.setMaximumWidth(95)
         bar.addWidget(self.repeats)
 
         self.speed = QtWidgets.QDoubleSpinBox()
@@ -271,11 +399,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.speed.setSingleStep(0.5)
         self.speed.setValue(config.PLAYBACK_SPEED)
         self.speed.setPrefix("speed  ")
+        self.speed.setMaximumWidth(95)
         bar.addWidget(self.speed)
 
-        bar.addSeparator()
-        bar.addAction("Save", self.save)
-        bar.addAction("Delete", self.delete_selected)
+        self.section(bar, "Editing")
+        bar.addAction(standard_icon("SP_DialogSaveButton"), "Save", self.save)
+        bar.addAction(standard_icon("SP_TrashIcon"), "Delete", self.delete_selected)
 
     ### Undo
 
@@ -339,6 +468,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         return True
 
+    def remember(self, path: str):
+        # absolute, or it only resolves when launched from the project folder
+        SETTINGS.setValue("last_macro", os.path.abspath(path))
+
     def adopt(self, steps: list, path: str, dirty: bool):
         """The macro is now this one. History does not carry across."""
         self.steps = steps
@@ -364,7 +497,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.adopt(steps, path, False)
-        SETTINGS.setValue("last_macro", path)
+        self.remember(path)
         self.status("opened %s" % path)
 
     def open_dialog(self):
@@ -382,7 +515,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return self.save_as()
 
         macro.save(self.steps, self.path)
-        SETTINGS.setValue("last_macro", self.path)
+        self.remember(self.path)
         self.mark_dirty(False)
         self.status("saved %s" % self.path)
         return True
@@ -400,10 +533,20 @@ class MainWindow(QtWidgets.QMainWindow):
         return self.save()
 
     def closeEvent(self, event: QtGui.QCloseEvent):
-        if self.confirm_discard():
-            event.accept()
-        else:
+        if not self.confirm_discard():
             event.ignore()
+            return
+
+        # a QThread still running when it is destroyed takes the process down
+        # with it. signals are blocked first so neither one calls back into a
+        # window that is on its way out
+        for thread in (self.record_thread, self.play_thread):
+            if thread and thread.isRunning():
+                thread.blockSignals(True)
+                thread.stop()
+                thread.wait(2000)
+
+        event.accept()
 
     ### The step list
 
@@ -575,6 +718,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     ### Recording and playback
 
+    def busy(self, running: bool):
+        """Only Stop is available while a recording or a replay is going."""
+        self.record_action.setEnabled(not running)
+        self.play_action.setEnabled(not running)
+        self.stop_action.setEnabled(running)
+
+    def stop(self):
+        if self.record_thread and self.record_thread.isRunning():
+            self.record_thread.stop()
+        else:
+            self.stop_playback()
+
     def start_recording(self, insert: bool):
         """Record either a new macro, or steps to drop into this one."""
         # only a replacement can lose work, and the selection says where an
@@ -583,13 +738,29 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.inserting_recording = insert
-        self.hide()   # otherwise clicking around this window lands in the macro
+
+        # minimised rather than hidden, so the taskbar entry stays and the
+        # window can be brought back to press Stop. anything clicked in it
+        # while restored does land in the macro, so the stop key is still the
+        # tidier way to finish
+        self.showMinimized()
+        self.busy(True)
+
+        self.overlay = Overlay()
+        self.overlay.show_over_screens(RECORDING_COLOUR, recording_label(False))
 
         self.record_thread = RecordThread()
+        self.record_thread.paused.connect(self.recording_paused)
         self.record_thread.done.connect(self.recording_finished)
         self.record_thread.start()
 
+    def recording_paused(self, paused: bool):
+        self.overlay.set_state(PAUSED_COLOUR if paused else RECORDING_COLOUR,
+                               recording_label(paused))
+
     def recording_finished(self, events: list):
+        self.overlay.close()
+        self.overlay = None
         recorder.save(events, config.RECORDING_PATH)
         steps = compactor.compact(events)
 
@@ -599,16 +770,37 @@ class MainWindow(QtWidgets.QMainWindow):
             # untitled, so a recording never writes over the open macro
             self.adopt(steps, None, True)
 
-        self.show()
+        self.showNormal()
+        self.busy(False)
         self.status("recorded %s events into %s step(s)" % (len(events), len(steps)))
 
     def start_playback(self):
+        """Get out of the way, count down, then run."""
         if not self.steps:
             return
 
-        self.play_action.setEnabled(False)
-        self.record_action.setEnabled(False)
-        self.stop_action.setEnabled(True)
+        self.busy(True)
+
+        # the macro types and clicks where it was recorded, so this window has
+        # to stop being the one in front of it
+        self.showMinimized()
+
+        self.overlay = Overlay()
+        self.overlay.show_over_screens(PLAYING_COLOUR, "")
+
+        self.remaining = config.COUNTDOWN_SECONDS
+        self.countdown_timer = QtCore.QTimer(self)
+        self.countdown_timer.timeout.connect(self.countdown)
+        self.countdown_timer.start(1000)
+        self.countdown()   # show the first number now, not a second from now
+
+    def countdown(self):
+        if self.remaining > 0:
+            self.overlay.set_label("Replaying in %s..." % self.remaining)
+            self.remaining -= 1
+            return
+
+        self.countdown_timer.stop()
 
         self.play_thread = PlayThread(self.steps, self.speed.value(),
                                       self.repeats.value())
@@ -617,6 +809,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.play_thread.start()
 
     def stop_playback(self):
+        # stopping during the countdown means the run never started
+        if self.countdown_timer and self.countdown_timer.isActive():
+            self.countdown_timer.stop()
+            self.playback_finished(False)
+            return
+
         if self.play_thread:
             self.play_thread.stop()
 
@@ -628,6 +826,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree.scrollToItem(self.tree.topLevelItem(row))
         self.running_row = row
 
+        if self.overlay:
+            self.overlay.set_label("Replaying %s / %s  ·  %s to abort"
+                                   % (row + 1, len(self.steps), config.ABORT_KEY))
+
     def shade(self, row: int, brush: QtGui.QBrush):
         item = self.tree.topLevelItem(row)
         if item is None:
@@ -637,13 +839,17 @@ class MainWindow(QtWidgets.QMainWindow):
             item.setBackground(column, brush)
 
     def playback_finished(self, finished: bool):
+        if self.overlay:
+            self.overlay.close()
+            self.overlay = None
+
+        self.showNormal()
+
         if self.running_row is not None:
             self.shade(self.running_row, QtGui.QBrush())
             self.running_row = None
 
-        self.play_action.setEnabled(True)
-        self.record_action.setEnabled(True)
-        self.stop_action.setEnabled(False)
+        self.busy(False)
         self.status("finished" if finished else "aborted")
 
     def status(self, message: str = ""):
@@ -655,7 +861,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def run():
+    # before the window exists, or windows has already decided our icon
+    system.set_app_id(config.APP_NAME)
+
     app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName(config.APP_NAME)
+    app.setWindowIcon(QtGui.QIcon(LOGO))
+
     window = MainWindow(SETTINGS.value("last_macro", ""))
     window.show()
     sys.exit(app.exec())

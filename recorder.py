@@ -25,12 +25,17 @@ def key_to_str(key) -> str:
         return key.name
 
     if key.char is not None:
+        # ctrl turns a letter into a control character, so ctrl+c arrives as
+        # \x03. the letter is what was actually pressed, so put it back
+        if (ord(key.char) < 32) and key.vk:
+            return chr(key.vk).lower()
+
         return key.char
 
     return "vk%s" % key.vk
 
 
-def record() -> list:
+def record(on_pause=None, on_ready=None) -> list:
     """
     Capture input until the stop key is pressed.
 
@@ -60,6 +65,11 @@ def record() -> list:
             pause["since"] = time.perf_counter()
             pause["active"] = True
             print("paused, press %s again to resume" % config.PAUSE_KEY)
+
+        # lets a caller show the state somewhere, since the key is global and
+        # whatever started the recording is usually out of the way by now
+        if on_pause:
+            on_pause(pause["active"])
 
     # Callbacks run on the windows hook thread, so they only ever append and
     # return. Anything slow in here lags the whole desktop, and if a callback
@@ -99,6 +109,12 @@ def record() -> list:
             return
 
         name = key_to_str(key)
+
+        # windows repeats a key that is being held. replaying the hold makes
+        # the target repeat it again, so recording the repeats would double them
+        if name in held_keys:
+            return
+
         held_keys.add(name)
         add("key", key=name, pressed=True)
 
@@ -121,6 +137,11 @@ def record() -> list:
     print("recording, press %s to pause and %s to stop" % (config.PAUSE_KEY, config.STOP_KEY))
     mouse_listener.start()
     keyboard_listener.start()
+
+    # hand the caller a way to stop us, since the stop key is not the only way
+    # somebody might want to finish. stopping the listener releases the join
+    if on_ready:
+        on_ready(keyboard_listener.stop)
 
     keyboard_listener.join()
     mouse_listener.stop()

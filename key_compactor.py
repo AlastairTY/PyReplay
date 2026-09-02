@@ -31,6 +31,18 @@ def modifiers_held(events: list, i: int) -> set:
     return held
 
 
+def hold_of(events: list, i: int) -> float | None:
+    """Seconds the key pressed at i stays down, or None if never released."""
+    press = events[i]
+
+    for event in events[i + 1:]:
+        if (event["type"] == "key" and event["key"] == press["key"]
+                and not event["pressed"]):
+            return event["t"] - press["t"]
+
+    return None
+
+
 def match_typing(events: list, i: int) -> tuple | None:
     """
     To collapse a run of printable keystrokes into one editable block of text.
@@ -56,6 +68,7 @@ def match_typing(events: list, i: int) -> tuple | None:
         return None
 
     chars = []
+    holds = []
     open_modifiers = set()
     first_char_t = None
     last_t = None
@@ -86,7 +99,14 @@ def match_typing(events: list, i: int) -> tuple | None:
             if (last_t is not None) and ((event["t"] - last_t) * 1000 > config.TYPING_GAP_MS):
                 break
 
+            # a key held down is not a keystroke, whatever character it makes.
+            # leave it to match_key, which keeps the duration
+            held = hold_of(events, j)
+            if (held is None) or ((held * 1000) > config.KEY_MAX_HOLD_MS):
+                break
+
             chars.append(key)
+            holds.append(held)
             if first_char_t is None:
                 first_char_t = event["t"]
             last_t = event["t"]
@@ -115,10 +135,15 @@ def match_typing(events: list, i: int) -> tuple | None:
     gaps = len(chars) - 1
     delay_ms = round((last_t - first_char_t) * 1000 / gaps) if gaps else config.TYPING_DELAY_MS
 
+    # the average hold, so a key tapped for a quarter of a second replays
+    # for a quarter of a second rather than a token instant
+    hold_ms = round(sum(holds) / len(holds) * 1000)
+
     step = {
         "type": "type_text",
         "text": "".join(chars),
         "delay_ms": delay_ms,
+        "hold_ms": hold_ms,
         "t_start": first["t"],
         "t_end": last_t,
     }
@@ -159,6 +184,9 @@ def match_key(events: list, i: int) -> tuple | None:
             step = {
                 "type": "key_press",
                 "key": event["key"],
+                # kept because an application that samples input rather than
+                # reading every event misses a tap with no duration
+                "hold_ms": round((following["t"] - event["t"]) * 1000),
                 "t_start": event["t"],
                 "t_end": following["t"],
             }
@@ -172,4 +200,11 @@ def match_key(events: list, i: int) -> tuple | None:
         "t_start": event["t"],
         "t_end": event["t"],
     }
+
+    # how long it stays down, so the release can top the hold up if the steps
+    # in between replay faster than they were recorded
+    held = hold_of(events, i)
+    if held is not None:
+        step["hold_ms"] = round(held * 1000)
+
     return step, 1

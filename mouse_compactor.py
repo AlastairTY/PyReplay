@@ -50,6 +50,18 @@ def simplify(points: list, epsilon: float) -> list:
     return left[:-1] + right
 
 
+def hold_of(events: list, i: int) -> float | None:
+    """Seconds the button pressed at i stays down, or None if never released."""
+    press = events[i]
+
+    for event in events[i + 1:]:
+        if (event["type"] == "click" and event["button"] == press["button"]
+                and not event["pressed"]):
+            return event["t"] - press["t"]
+
+    return None
+
+
 def match_click(events: list, i: int) -> tuple | None:
     """
     To detect a typical fast mouse click. Drags and click & holds are
@@ -132,6 +144,14 @@ def match_mouse(events: list, i: int) -> tuple | None:
         "t_start": event["t"],
         "t_end": event["t"],
     }
+
+    # how long it stays down, so the release can top the hold up if the steps
+    # in between replay faster than they were recorded
+    if event["pressed"]:
+        held = hold_of(events, i)
+        if held is not None:
+            step["hold_ms"] = round(held * 1000)
+
     return step, 1
 
 

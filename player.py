@@ -1,6 +1,7 @@
 from pynput import keyboard, mouse
 from system import high_resolution_timer
 import config
+import math
 import time
 
 
@@ -15,6 +16,11 @@ def str_to_key(name: str):
 
     if name.startswith("vk"):
         return keyboard.KeyCode.from_vk(int(name[2:]))
+
+    # older recordings stored ctrl+c as \x03, which no key produces on its own.
+    # send the letter and let the held ctrl do its work
+    if (len(name) == 1) and (ord(name) < 32):
+        return keyboard.KeyCode.from_char(chr(ord(name) + 96))
 
     return keyboard.KeyCode.from_char(name)
 
@@ -36,6 +42,7 @@ class Player:
         self.aborted = False
         self.held_keys = set()
         self.held_buttons = set()
+        self.holding = {}
         self.mouse = mouse.Controller()
         self.keyboard = keyboard.Controller()
 
@@ -87,6 +94,7 @@ class Player:
 
         self.held_keys.clear()
         self.held_buttons.clear()
+        self.holding.clear()
 
     def sleep_until(self, deadline: float):
         """Wait in slices so the abort key stays responsive during long waits."""
@@ -114,13 +122,23 @@ class Player:
         """
         Helper to move a cursor to an action's location.
 
-        Travel to a point rather than jumping to it.
+        Travels there rather than jumping, unless config says to jump. Some
+        applications need the motion in between to fire hover states or to
+        recognise a drag, and others only care where the cursor ends up.
         """
         origin = self.mouse.position
-        if origin == (x, y):
+        travel = math.hypot(x - origin[0], y - origin[1])
+        if travel < 1:
             return
 
-        duration = (config.MOVE_DURATION_MS / 1000) / self.speed
+        if not config.SMOOTH_TRAVEL:
+            self.mouse.position = (x, y)
+            return
+
+        # proportional to the distance and capped, so correcting a pixel of
+        # drift does not take as long as crossing the screen
+        seconds = min(travel / config.MOVE_SPEED_PX, config.MOVE_DURATION_MS / 1000)
+        duration = seconds / self.speed
         slices = max(1, round(duration / MOVE_INTERVAL))
         start = time.perf_counter()
 
@@ -151,16 +169,20 @@ class Player:
             self.move_to(*step["to"])
             return
 
-        start = time.perf_counter()
+        # travel to the start rather than jumping, in case a step was reordered
+        # and the cursor is no longer where the path begins
         previous = path[0]
-        self.mouse.position = (previous[1], previous[2])
+        self.move_to(previous[1], previous[2])
 
+        start = time.perf_counter()
         for point in path[1:]:
             if self.aborted:
                 return
 
+            # scaled by speed, or a fast replay issues the same number of
+            # cursor updates in a fraction of the time and floods the queue
             span = point[0] - previous[0]
-            slices = max(1, round(span / MOVE_INTERVAL))
+            slices = max(1, round((span / self.speed) / MOVE_INTERVAL))
 
             for n in range(1, slices + 1):
                 fraction = n / slices
@@ -176,12 +198,35 @@ class Player:
 
     ### Mouse buttons
 
+    def hold(self, ms: float, since: float = None):
+        """
+        Wait until something has been down for ms.
+
+        An application that samples input periodically, rather than reading
+        every event, cannot see a press and release in the same instant. When
+        since is given the wait covers whatever already happened, so a button
+        held across other steps still ends up down for as long as it was.
+        """
+        started = time.perf_counter() if since is None else since
+        self.sleep_until(started + (ms / 1000) / self.speed)
+
+    def top_up(self, kind: str, name: str):
+        """
+        Wait out the rest of a hold before releasing.
+
+        The steps in between may not take as long as they did when recorded,
+        which would let go early and cut the action short.
+        """
+        pressed, hold_ms = self.holding.pop((kind, name), (None, None))
+        if hold_ms:
+            self.hold(hold_ms, since=pressed)
+
     def play_click(self, step: dict):
         self.move_to(step["x"], step["y"])
         button = mouse.Button[step["button"]]
 
         self.mouse.press(button)
-        self.sleep_until(time.perf_counter() + (step.get("hold_ms", 50) / 1000) / self.speed)
+        self.hold(step.get("hold_ms", config.HOLD_MS))
         self.mouse.release(button)
 
     def play_mouse_down(self, step: dict):
@@ -189,12 +234,14 @@ class Player:
         button = mouse.Button[step["button"]]
 
         self.held_buttons.add(button)
+        self.holding["button", step["button"]] = (time.perf_counter(), step.get("hold_ms"))
         self.mouse.press(button)
 
     def play_mouse_up(self, step: dict):
         self.move_to(step["x"], step["y"])
         button = mouse.Button[step["button"]]
 
+        self.top_up("button", step["button"])
         self.mouse.release(button)
         self.held_buttons.discard(button)
 
@@ -208,27 +255,38 @@ class Player:
         # typed one character at a time, since Controller.type() sends the whole
         # string as fast as it can and outruns anything that validates as you go
         text = step["text"]
-        delay = (step.get("delay_ms", config.TYPING_DELAY_MS) / 1000) / self.speed
+        delay_ms = step.get("delay_ms", config.TYPING_DELAY_MS)
+
+        # each key is held for as long as it was, and the hold comes out of
+        # the gap to the next one so the run keeps its pace
+        hold_ms = step.get("hold_ms", min(config.HOLD_MS, delay_ms))
 
         for n, character in enumerate(text):
             if self.aborted:
                 return
 
-            self.keyboard.type(character)
+            self.keyboard.press(character)
+            self.hold(hold_ms)
+            self.keyboard.release(character)
+
             if n < len(text) - 1:
-                self.sleep_until(time.perf_counter() + delay)
+                self.hold(max(0, delay_ms - hold_ms))
 
     def play_key_press(self, step: dict):
         key = str_to_key(step["key"])
         self.keyboard.press(key)
+        self.hold(step.get("hold_ms", config.HOLD_MS))
         self.keyboard.release(key)
 
     def play_key_down(self, step: dict):
         key = str_to_key(step["key"])
         self.held_keys.add(key)
+        self.holding["key", step["key"]] = (time.perf_counter(), step.get("hold_ms"))
         self.keyboard.press(key)
 
     def play_key_up(self, step: dict):
+        self.top_up("key", step["key"])
+
         key = str_to_key(step["key"])
         self.keyboard.release(key)
         self.held_keys.discard(key)
@@ -236,7 +294,7 @@ class Player:
     ### Timing
 
     def play_wait(self, step: dict):
-        self.sleep_until(time.perf_counter() + (step["ms"] / 1000) / self.speed)
+        self.hold(step["ms"])
 
 
 def play(steps: list, speed: float = None) -> bool:

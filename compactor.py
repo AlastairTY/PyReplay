@@ -64,11 +64,22 @@ def insert_waits(steps: list) -> list:
     timing be seen and edited instead of being baked into the recording.
     """
     out = []
+
+    # a gap too small to be worth a step is carried into the next one rather
+    # than dropped. otherwise the lost milliseconds add up and a key held
+    # across many steps comes out shorter than it was
+    carried = 0.0
+
     for step in steps:
         if out:
-            gap_ms = round((step["t_start"] - out[-1]["t_end"]) * 1000)
+            gap = (step["t_start"] - out[-1]["t_end"]) + carried
+            gap_ms = round(gap * 1000)
+
             if gap_ms > config.WAIT_THRESHOLD_MS:
                 out.append(make_wait(gap_ms, out[-1]["t_end"], step["t_start"]))
+                carried = 0.0
+            else:
+                carried = gap
 
         out.append(step)
 

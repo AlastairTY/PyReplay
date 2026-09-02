@@ -24,6 +24,19 @@ def enable_dpi_awareness():
         ctypes.windll.user32.SetProcessDPIAware()
 
 
+def set_app_id(app_id: str):
+    """
+    Claim a taskbar identity on windows.
+
+    A python script otherwise inherits python.exe's identity, so the window
+    icon never reaches the taskbar and windows groups us with other scripts.
+    """
+    if sys.platform != "win32":
+        return
+
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+
+
 @contextlib.contextmanager
 def high_resolution_timer():
     """

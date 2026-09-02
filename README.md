@@ -1,3 +1,4 @@
+<img src="assets/pyreplay.png" alt="Logo" align="left" width="40" height="40">
 
 # PyReplay
 
@@ -57,6 +58,10 @@ uv run main.py compact    # rebuild a macro from the raw recording
 While recording, `F10` pauses and `F9` stops. During playback `F9` aborts.
 Both keys live in `config.py`, along with the compaction thresholds.
 
+A coloured border marks the screen while recording or replaying, so it is
+always clear which is running. Play minimises the editor and counts down first,
+so the macro lands in the app you recorded against rather than in PyReplay.
+
 Macros are JSON and are saved wherever you point the editor, `macros/` by
 default. Two more files live in `outputs/`:
 
@@ -64,10 +69,6 @@ default. Two more files live in `outputs/`:
 | --- | --- |
 | `outputs/recording.json` | the raw event log from the last recording |
 | `outputs/macro.json` | the steps the CLI reads when you do not name a macro |
-
-> Recording captures **everything** typed while it runs, passwords included.
-> Recordings stay out of git by default. Use `F10` to pause before typing
-> anything you would not want saved to disk.
 
 
 ## How it works
@@ -94,6 +95,5 @@ the thresholds in `config.py` without recording again.
 ## Roadmap
 
 - Image & text matching w/ OCR
-- Post-playback options
 - Scheduling
 
